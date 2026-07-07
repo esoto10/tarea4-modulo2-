@@ -10,213 +10,201 @@ import java.net.Socket;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Scanner;
 
 /**
- * ══════════════════════════════════════════════════════════════════
- * ConsumerClient — Cliente consumidor de mensajes.
- * ══════════════════════════════════════════════════════════════════
+ * ConsumerClient — Cliente consumidor con soporte para 3 patrones.
  *
- * Aplicación de consola que se conecta al Message Broker vía TCP
- * y recibe mensajes en tiempo real. Cada mensaje se muestra
- * formateado en consola inmediatamente al recibirlo.
- *
- * El consumer es completamente PASIVO: no envía datos al broker,
- * solo escucha. El broker (a través del dispatcher) le entrega
- * mensajes automáticamente cuando los hay en la cola.
- *
- * ── Protocolo de comunicación ─────────────────────────────────────
- *
- *   Paso 1 — Identificación:
- *     Cliente → Broker:  "CONSUMER\n"
- *     Broker  → Cliente: "OK|Conectado como CONSUMER...\n"
- *
- *   Paso 2 — Recepción de mensajes (indefinidamente):
- *     Broker  → Cliente: "MSG|<id>|<timestamp>|<contenido>\n"
- *
- *   El consumer queda bloqueado en readLine() esperando el siguiente
- *   mensaje. Con Virtual Threads (en el broker) esto escala muy bien
- *   sin consumir recursos del OS.
- *
- * ── Formato de mensaje recibido ───────────────────────────────────
- *
- *   MSG|3f4a9b12-...|2025-01-15T10:30:00.123456789Z|Hola Mundo
- *     ^    ^                ^                           ^
- *     |    |                |                           |
- *   tipo  UUID           timestamp ISO-8601           contenido
- *
- * ── Múltiples consumers ────────────────────────────────────────────
- *
- * Pueden ejecutarse MÚLTIPLES instancias del ConsumerClient simultáneamente.
- * El broker registrará cada una y el dispatcher enviará TODOS los mensajes
- * a TODOS los consumers conectados (broadcast).
- *
- * Esto es diferente a una cola de trabajo (work queue) donde cada mensaje
- * va a UN solo consumer. Aquí implementamos el patrón BROADCAST / FAN-OUT.
+ * Al conectar muestra un menu para elegir:
+ *   1 - Send and Forget  : suscribirse a una cola (un mensaje por consumer, round-robin)
+ *   2 - Request-Response : handler que recibe solicitudes y responde automaticamente
+ *   3 - Pub/Sub Topic    : suscribirse a topics, recibe broadcast de publishers
  */
 public class ConsumerClient {
 
-    private static final String BROKER_HOST = "localhost";
-    private static final int BROKER_PORT = 9090;
+    private static final String HOST = "localhost";
+    private static final int    PORT = 9090;
 
-    /**
-     * Formateador de timestamp para mostrar fechas en formato local legible.
-     *
-     * El broker envía timestamps en UTC ISO-8601.
-     * Los convertimos a la zona horaria local del sistema para
-     * mejor legibilidad en la consola.
-     *
-     * Ejemplo de conversión:
-     *   UTC:   2025-01-15T15:30:00Z
-     *   Local: 2025-01-15 10:30:00 (si estamos en UTC-5)
-     */
-    private static final DateTimeFormatter DISPLAY_FORMATTER =
-        DateTimeFormatter
-            .ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
-            .withZone(ZoneId.systemDefault());
+    private static final DateTimeFormatter FMT =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault());
 
-    /** Contador de mensajes recibidos en esta sesión */
-    private static int messageCount = 0;
+    private static int msgCount = 0;
 
     public static void main(String[] args) {
         printBanner();
-        System.out.println("Conectando a broker " + BROKER_HOST + ":" + BROKER_PORT + "...\n");
+        System.out.println("Conectando a broker " + HOST + ":" + PORT + "...\n");
 
-        // try-with-resources: cierra socket y streams automáticamente al salir
         try (
-            Socket socket = new Socket(BROKER_HOST, BROKER_PORT);
+            Socket socket = new Socket(HOST, PORT);
             PrintWriter out = new PrintWriter(
-                new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), "UTF-8")),
-                true  // autoFlush
-            );
+                new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), "UTF-8")), true);
             BufferedReader in = new BufferedReader(
-                new InputStreamReader(socket.getInputStream(), "UTF-8"))
+                new InputStreamReader(socket.getInputStream(), "UTF-8"));
+            Scanner kb = new Scanner(System.in)
         ) {
-            System.out.println("Conectado al broker!");
-
-            // ── Paso 1: Identificarse como CONSUMER ───────────────────────
+            System.out.println("Conectado!\n");
             out.println("CONSUMER");
 
-            // Leer confirmación del broker (primera respuesta)
-            String confirmation = in.readLine();
-            if (confirmation != null) {
-                if (confirmation.startsWith("OK|")) {
-                    System.out.println("[BROKER] " + confirmation.substring(3));
-                } else {
-                    System.out.println("[BROKER] " + confirmation);
-                }
+            // Leer las 4 lineas de bienvenida del broker
+            for (int i = 0; i < 4; i++) {
+                String line = in.readLine();
+                if (line != null) System.out.println("[BROKER] " + (line.startsWith("OK|") ? line.substring(3) : line));
             }
 
-            System.out.println("─────────────────────────────────────────");
-            System.out.println(" Esperando mensajes del broker...");
-            System.out.println(" Presiona Ctrl+C para desconectarse.");
-            System.out.println("─────────────────────────────────────────\n");
+            System.out.println("\nSelecciona el patron de consumo:");
+            System.out.println("  1 - Send and Forget  (recibir de una cola)");
+            System.out.println("  2 - Request-Response (handler: recibe y responde)");
+            System.out.println("  3 - Pub/Sub Topic    (suscriptor de topics)");
+            System.out.print("\nPatron [1/2/3]: ");
+            System.out.flush();
 
-            // ── Paso 2: Loop de recepción de mensajes ─────────────────────
-            //
-            // readLine() BLOQUEA hasta que el broker envíe una línea.
-            // Cuando no hay mensajes, este thread duerme eficientemente
-            // (el OS lo despierta solo cuando llegan bytes al socket).
-            //
-            // El loop termina cuando:
-            //   a) El broker cierra la conexión (readLine() devuelve null)
-            //   b) El usuario presiona Ctrl+C (IOException)
-            String line;
-            while ((line = in.readLine()) != null) {
-                displayMessage(line);
+            String choice = kb.hasNextLine() ? kb.nextLine().trim() : "1";
+
+            switch (choice) {
+                case "1" -> subscribeQueue(out, in, kb);
+                case "2" -> subscribeRR(out, in);
+                case "3" -> subscribeTopic(out, in, kb);
+                default  -> { System.out.println("Opcion invalida. Usando patron 1."); subscribeQueue(out, in, kb); }
             }
 
-            System.out.println("\n[INFO] Conexión cerrada por el broker.");
+            System.out.println("\nTotal mensajes recibidos: " + msgCount);
+            System.out.println("Consumer desconectado.");
 
         } catch (IOException e) {
-            // Verificar si fue una desconexión normal (Ctrl+C) o un error real
-            if (e.getMessage() != null && e.getMessage().contains("Connection reset")) {
-                System.out.println("\n[INFO] Conexión cerrada.");
-            } else {
-                System.err.println("\n[ERROR] No se pudo conectar al broker:");
-                System.err.println("  " + e.getMessage());
-                System.err.println("\n¿Está corriendo el broker?");
-                System.err.println("  Ejecuta primero: cd broker-server && mvn exec:java");
-                System.exit(1);
+            System.err.println("[ERROR] No se pudo conectar: " + e.getMessage());
+            System.err.println("Verifica que el broker este corriendo: cd broker-server && mvn exec:java");
+        }
+    }
+
+    // --- PATRON 1: Send and Forget ---
+
+    private static void subscribeQueue(PrintWriter out, BufferedReader in, Scanner kb)
+            throws IOException {
+        System.out.print("\nNombre de la cola (ej: pedidos): ");
+        System.out.flush();
+        String queue = kb.hasNextLine() ? kb.nextLine().trim() : "default";
+        if (queue.isBlank()) queue = "default";
+
+        out.println("QUEUE_SUBSCRIBE|" + queue);
+        String ack = in.readLine();
+        System.out.println("[BROKER] " + (ack != null && ack.startsWith("OK|") ? ack.substring(3) : ack));
+        System.out.println("\n[Send and Forget] Escuchando cola: " + queue);
+        System.out.println("Presiona Ctrl+C para salir.\n");
+
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("QUEUE_MSG|")) {
+                String[] p = line.split("\\|", 5);
+                printQueueMsg(p.length>1?p[1]:"?", p.length>2?p[2]:"?", p.length>3?p[3]:"?", p.length>4?p[4]:line);
+            } else if (line.startsWith("OK|") || line.startsWith("ERROR|")) {
+                System.out.println("[BROKER] " + (line.startsWith("OK|") ? line.substring(3) : line));
             }
         }
-
-        System.out.println("Total mensajes recibidos en esta sesión: " + messageCount);
-        System.out.println("Consumer desconectado. ¡Hasta luego!");
     }
 
-    /**
-     * Parsea y muestra un mensaje recibido del broker.
-     *
-     * Formato esperado: MSG|<id>|<timestamp>|<content>
-     *
-     * Si la línea no tiene el formato esperado, la muestra como texto plano
-     * (puede ser un mensaje de estado del broker como OK|...).
-     *
-     * @param raw la línea de texto recibida del socket
-     */
-    private static void displayMessage(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return;
-        }
+    // --- PATRON 2: Request-Response (handler) ---
 
-        // Intentar parsear como mensaje (formato: MSG|id|timestamp|content)
-        if (raw.startsWith("MSG|")) {
-            // Dividir en máximo 4 partes para respetar '|' en el contenido
-            String[] parts = raw.split("\\|", 4);
+    private static void subscribeRR(PrintWriter out, BufferedReader in)
+            throws IOException {
+        out.println("RR_READY");
+        String ack = in.readLine();
+        System.out.println("[BROKER] " + (ack != null && ack.startsWith("OK|") ? ack.substring(3) : ack));
+        System.out.println("\n[Request-Response] Handler activo. Respondiendo automaticamente.");
+        System.out.println("Presiona Ctrl+C para salir.\n");
 
-            if (parts.length == 4) {
-                messageCount++;
-                String id = parts[1];
-                String formattedTimestamp = formatTimestamp(parts[2]);
-                String content = parts[3];
-
-                // Mostrar el mensaje con formato visual claro
-                System.out.println("┌─────────────────────────────────────────");
-                System.out.printf("│  MENSAJE #%-3d RECIBIDO%n", messageCount);
-                System.out.println("├─────────────────────────────────────────");
-                System.out.println("│  ID        : " + id);
-                System.out.println("│  Timestamp : " + formattedTimestamp);
-                System.out.println("│  Contenido : " + content);
-                System.out.println("└─────────────────────────────────────────");
-                System.out.println(); // línea en blanco para separar mensajes
-                return;
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("REQUEST_MSG|")) {
+                String[] p = line.split("\\|", 5);
+                String correlId = p.length > 1 ? p[1] : "?";
+                String content  = p.length > 4 ? p[4] : line;
+                printRequestMsg(correlId, p.length>2?p[2]:"?", p.length>3?p[3]:"?", content);
+                String response = "PROCESADO: " + content.toUpperCase();
+                out.println("RESPONSE|" + correlId + "|" + response);
+                System.out.println("-> Respuesta enviada: " + response + "\n");
             }
         }
+    }
 
-        // Si no es un MSG, mostrar como respuesta genérica del broker
-        if (raw.startsWith("OK|")) {
-            System.out.println("[BROKER] " + raw.substring(3));
-        } else if (raw.startsWith("ERROR|")) {
-            System.err.println("[BROKER ERROR] " + raw.substring(6));
-        } else {
-            System.out.println("[BROKER] " + raw);
+    // --- PATRON 3: Pub/Sub ---
+
+    private static void subscribeTopic(PrintWriter out, BufferedReader in, Scanner kb)
+            throws IOException {
+        System.out.print("\nTopics (separados por coma, ej: noticias,economia): ");
+        System.out.flush();
+        String input = kb.hasNextLine() ? kb.nextLine().trim() : "general";
+        if (input.isBlank()) input = "general";
+
+        for (String t : input.split(",")) {
+            String topic = t.trim();
+            if (!topic.isBlank()) {
+                out.println("TOPIC_SUBSCRIBE|" + topic);
+                String ack = in.readLine();
+                System.out.println("[BROKER] " + (ack != null && ack.startsWith("OK|") ? ack.substring(3) : ack));
+            }
+        }
+        System.out.println("\n[Pub/Sub] Suscrito a: " + input);
+        System.out.println("Presiona Ctrl+C para salir.\n");
+
+        String line;
+        while ((line = in.readLine()) != null) {
+            if (line.startsWith("TOPIC_MSG|")) {
+                String[] p = line.split("\\|", 5);
+                printTopicMsg(p.length>1?p[1]:"?", p.length>2?p[2]:"?", p.length>3?p[3]:"?", p.length>4?p[4]:line);
+            } else if (line.startsWith("OK|") || line.startsWith("ERROR|")) {
+                System.out.println("[BROKER] " + (line.startsWith("OK|") ? line.substring(3) : line));
+            }
         }
     }
 
-    /**
-     * Convierte un timestamp ISO-8601 UTC al formato de fecha/hora local legible.
-     *
-     * @param isoTimestamp timestamp en formato "2025-01-15T10:30:00.123456789Z"
-     * @return timestamp formateado como "2025-01-15 10:30:00.123" en zona local
-     */
-    private static String formatTimestamp(String isoTimestamp) {
-        try {
-            Instant instant = Instant.parse(isoTimestamp);
-            return DISPLAY_FORMATTER.format(instant);
-        } catch (Exception e) {
-            // Si el formato no es parseable, devolver el original
-            return isoTimestamp;
-        }
+    // --- DISPLAY ---
+
+    private static void printQueueMsg(String queue, String id, String ts, String content) {
+        msgCount++;
+        System.out.println("+-----------------------------------------");
+        System.out.printf("|  [COLA] MENSAJE #%d%n", msgCount);
+        System.out.println("|  Cola      : " + queue);
+        System.out.println("|  ID        : " + id);
+        System.out.println("|  Timestamp : " + formatTs(ts));
+        System.out.println("|  Contenido : " + content);
+        System.out.println("+-----------------------------------------\n");
     }
 
-    /** Banner de presentación del consumer */
+    private static void printTopicMsg(String topic, String id, String ts, String content) {
+        msgCount++;
+        System.out.println("+-----------------------------------------");
+        System.out.printf("|  [TOPIC] MENSAJE #%d%n", msgCount);
+        System.out.println("|  Topic     : " + topic);
+        System.out.println("|  ID        : " + id);
+        System.out.println("|  Timestamp : " + formatTs(ts));
+        System.out.println("|  Contenido : " + content);
+        System.out.println("+-----------------------------------------\n");
+    }
+
+    private static void printRequestMsg(String correlId, String id, String ts, String content) {
+        msgCount++;
+        System.out.println("+-----------------------------------------");
+        System.out.printf("|  [REQUEST] SOLICITUD #%d%n", msgCount);
+        System.out.println("|  CorrelId  : " + correlId);
+        System.out.println("|  ID        : " + id);
+        System.out.println("|  Timestamp : " + formatTs(ts));
+        System.out.println("|  Solicitud : " + content);
+        System.out.println("+-----------------------------------------");
+    }
+
+    private static String formatTs(String iso) {
+        try { return FMT.format(Instant.parse(iso)); }
+        catch (Exception e) { return iso; }
+    }
+
     private static void printBanner() {
         System.out.println();
         System.out.println("╔══════════════════════════════════════════════════╗");
-        System.out.println("║       MESSAGE BROKER — CONSUMER CLIENT           ║");
+        System.out.println("║     MESSAGE BROKER — CONSUMER (3 patrones)      ║");
         System.out.println("╠══════════════════════════════════════════════════╣");
-        System.out.println("║  Recibe mensajes del broker en tiempo real       ║");
-        System.out.println("║  Protocolo: MSG|id|timestamp|contenido           ║");
+        System.out.println("║  1. Send and Forget  -> recibe de una cola       ║");
+        System.out.println("║  2. Request-Response -> handler: recibe/responde ║");
+        System.out.println("║  3. Pub/Sub Topic    -> suscriptor de topics     ║");
         System.out.println("╚══════════════════════════════════════════════════╝");
     }
 }
