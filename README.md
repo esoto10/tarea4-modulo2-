@@ -1,4 +1,4 @@
-# Message Broker POC — Java 21
+# Message Broker POC
 
 Implementación desde cero de un **Message Broker** usando únicamente el JDK de Java 21.  
 Sin frameworks, sin dependencias externas. Solo Java puro.
