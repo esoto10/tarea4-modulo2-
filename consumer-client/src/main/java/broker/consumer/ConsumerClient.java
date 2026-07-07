@@ -104,13 +104,34 @@ public class ConsumerClient {
 
     // --- PATRON 2: Request-Response (handler) ---
 
+    /**
+     * Inventario de productos simulado en memoria.
+     * Clave  : codigo de producto (lo que envia el producer)
+     * Valor  : informacion de stock y precio
+     *
+     * En una aplicacion real esto seria una consulta a base de datos,
+     * llamada a un microservicio, calculo dinamico, etc.
+     */
+    private static final java.util.Map<String, String> INVENTARIO = java.util.Map.of(
+        "prod-001", "Laptop Dell 15\" | Stock: 8 unidades  | Precio: $1,299.00",
+        "prod-002", "Mouse Logitech   | Stock: 42 unidades | Precio: $29.90",
+        "prod-003", "Teclado Mecanico | Stock: 15 unidades | Precio: $89.50",
+        "prod-004", "Monitor 4K 27\"  | Stock: 3 unidades  | Precio: $549.00",
+        "prod-005", "Auriculares Sony | Stock: 0 unidades  | Precio: $199.00 (AGOTADO)",
+        "prod-006", "Webcam HD 1080p  | Stock: 22 unidades | Precio: $79.00",
+        "prod-007", "SSD 1TB          | Stock: 11 unidades | Precio: $109.00",
+        "prod-008", "Hub USB-C        | Stock: 35 unidades | Precio: $39.90"
+    );
+
     private static void subscribeRR(PrintWriter out, BufferedReader in)
             throws IOException {
         out.println("RR_READY");
         String ack = in.readLine();
         System.out.println("[BROKER] " + (ack != null && ack.startsWith("OK|") ? ack.substring(3) : ack));
-        System.out.println("\n[Request-Response] Handler activo. Respondiendo automaticamente.");
-        System.out.println("Presiona Ctrl+C para salir.\n");
+        System.out.println("\n[Request-Response] Handler de inventario activo.");
+        System.out.println("Productos disponibles para consultar:");
+        INVENTARIO.forEach((k, v) -> System.out.println("  " + k + " -> " + v.split("\\|")[0].trim()));
+        System.out.println("\nEspera solicitudes del producer. Ctrl+C para salir.\n");
 
         String line;
         while ((line = in.readLine()) != null) {
@@ -119,7 +140,14 @@ public class ConsumerClient {
                 String correlId = p.length > 1 ? p[1] : "?";
                 String content  = p.length > 4 ? p[4] : line;
                 printRequestMsg(correlId, p.length>2?p[2]:"?", p.length>3?p[3]:"?", content);
-                String response = "PROCESADO: " + content.toUpperCase();
+
+                // Consultar inventario por codigo de producto
+                String productKey = content.trim().toLowerCase();
+                String response = INVENTARIO.containsKey(productKey)
+                    ? "OK | " + INVENTARIO.get(productKey)
+                    : "ERROR | Producto '" + content + "' no encontrado. Productos: "
+                        + String.join(", ", INVENTARIO.keySet());
+
                 out.println("RESPONSE|" + correlId + "|" + response);
                 System.out.println("-> Respuesta enviada: " + response + "\n");
             }

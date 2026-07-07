@@ -541,22 +541,46 @@ Resultado en Consumer:
 
 ---
 
-### Ejemplo B — Patron 2: Request-Response
+### Ejemplo B — Patron 2: Request-Response (Consulta de Inventario)
 
-Terminal 2 — Consumer (handler de consultas):
+Terminal 2 — Consumer (handler de inventario):
 ```bash
 cd consumer-client
 mvn exec:java
 # Seleccionar: 2
-# (queda activo esperando REQUEST_MSG y responde automaticamente)
 ```
 
-Terminal 3 — Producer (cliente que hace consultas):
+Al arrancar el handler muestra el catalogo disponible:
+```
+[Request-Response] Handler de inventario activo.
+Productos disponibles para consultar:
+  prod-001 -> Laptop Dell 15"
+  prod-002 -> Mouse Logitech
+  prod-003 -> Teclado Mecanico
+  prod-004 -> Monitor 4K 27"
+  prod-005 -> Auriculares Sony
+  prod-006 -> Webcam HD 1080p
+  prod-007 -> SSD 1TB
+  prod-008 -> Hub USB-C
+```
+
+Terminal 3 — Producer (cliente que consulta productos):
 ```bash
 cd producer-client
 mvn exec:java
 # Seleccionar: 2
-# Solicitud: Cuanto es 10 por 10?
+# Solicitud: prod-001
+```
+
+Resultado en Consumer (handler):
+```
++-----------------------------------------
+|  [REQUEST] SOLICITUD #1
+|  CorrelId  : 7ad22946-a827-...
+|  Timestamp : 2026-07-06 20:10:00.123
+|  Solicitud : prod-001
++-----------------------------------------
+-> Respuesta enviada: OK | Laptop Dell 15" | Stock: 8 unidades | Precio: $1,299.00
 ```
 
 Resultado en Producer:
@@ -566,8 +590,33 @@ Resultado en Producer:
 
 [RESPUESTA RECIBIDA]
   CorrelId : 7ad22946...
-  Respuesta: PROCESADO: CUANTO ES 10 POR 10?
+  Respuesta: OK | Laptop Dell 15" | Stock: 8 unidades | Precio: $1,299.00
 ```
+
+Consulta de producto agotado (`prod-005`):
+```
+[RESPUESTA RECIBIDA]
+  Respuesta: OK | Auriculares Sony | Stock: 0 unidades | Precio: $199.00 (AGOTADO)
+```
+
+Consulta de producto inexistente (`prod-999`):
+```
+[RESPUESTA RECIBIDA]
+  Respuesta: ERROR | Producto 'prod-999' no encontrado. Productos: prod-001, prod-002, ...
+```
+
+Productos del catalogo:
+
+| Codigo | Producto | Stock | Precio |
+|---|---|---|---|
+| prod-001 | Laptop Dell 15" | 8 | $1,299.00 |
+| prod-002 | Mouse Logitech | 42 | $29.90 |
+| prod-003 | Teclado Mecanico | 15 | $89.50 |
+| prod-004 | Monitor 4K 27" | 3 | $549.00 |
+| prod-005 | Auriculares Sony | 0 | $199.00 (AGOTADO) |
+| prod-006 | Webcam HD 1080p | 22 | $79.00 |
+| prod-007 | SSD 1TB | 11 | $109.00 |
+| prod-008 | Hub USB-C | 35 | $39.90 |
 
 ---
 
